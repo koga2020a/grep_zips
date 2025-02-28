@@ -1,0 +1,277 @@
+import argparse
+import os
+import zipfile
+import io
+import datetime
+import re
+import sys
+import shutil
+
+def get_cached_files(zip_path, cache_root, extensions):
+    """
+    指定した .zip ファイルに対するキャッシュ済み対象ファイルの一覧を返します。
+    キャッシュディレクトリ内に、元ファイルのサイズと最終更新日時を記録した metadata.txt を用いて、
+    同一ならキャッシュを利用し、異なればキャッシュを削除して再解凍します。
+    """
+    try:
+        size = os.path.getsize(zip_path)
+        mtime = os.path.getmtime(zip_path)
+    except Exception as e:
+        print(f"Error getting metadata for {zip_path}: {e}")
+        return []
+    
+    base = os.path.basename(zip_path)
+    zip_cache_dir = os.path.join(cache_root, base)
+    meta_file = os.path.join(zip_cache_dir, "metadata.txt")
+    
+    need_extract = True
+    if os.path.isdir(zip_cache_dir) and os.path.exists(meta_file):
+        try:
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                cached_size = int(f.readline().strip())
+                cached_mtime = float(f.readline().strip())
+            if cached_size == size and cached_mtime == mtime:
+                need_extract = False
+        except Exception as e:
+            need_extract = True
+    
+    if need_extract:
+        if os.path.isdir(zip_cache_dir):
+            shutil.rmtree(zip_cache_dir)
+        os.makedirs(zip_cache_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            for file_name in z.namelist():
+                if any(file_name.lower().endswith(ext) for ext in extensions):
+                    try:
+                        with z.open(file_name) as f:
+                            out_path = os.path.join(zip_cache_dir, os.path.basename(file_name))
+                            with open(out_path, 'wb') as out_f:
+                                out_f.write(f.read())
+                    except Exception as e:
+                        print(f"Error extracting {file_name} from {zip_path}: {e}")
+        try:
+            with open(meta_file, 'w', encoding='utf-8') as f:
+                f.write(f"{size}\n")
+                f.write(f"{mtime}\n")
+        except Exception as e:
+            print(f"Error writing metadata for {zip_path}: {e}")
+    
+    target_files = []
+    for entry in os.listdir(zip_cache_dir):
+        if any(entry.lower().endswith(ext) for ext in extensions):
+            target_files.append(os.path.join(zip_cache_dir, entry))
+    return target_files
+
+def search_in_file(file_path, search_terms, output_lines, number_mode=False, regex_pattern=None, label="FILE"):
+    """
+    対象ファイルに対して、各行単位で検索を行います。
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if regex_pattern is not None:
+                    if re.search(regex_pattern, line):
+                        result_line = (
+                            f"{label}: {os.path.basename(file_path)}, "
+                            f"Line: {line_number}, "
+                            f"Content: {line}"
+                        )
+                        output_lines.append(result_line)
+                else:
+                    match_found = True
+                    for term in search_terms:
+                        if number_mode and term.isdigit():
+                            pattern = r'(?<![\d\.\-])' + re.escape(term) + r'(?![\d\.\-])'
+                            if not re.search(pattern, line):
+                                match_found = False
+                                break
+                        else:
+                            if term not in line:
+                                match_found = False
+                                break
+                    if match_found:
+                        result_line = (
+                            f"{label}: {os.path.basename(file_path)}, "
+                            f"Line: {line_number}, "
+                            f"Content: {line}"
+                        )
+                        output_lines.append(result_line)
+    except Exception as e:
+        print(f"Error processing file {file_path}: {e}")
+
+def search_in_zip(zip_path, search_terms, output_lines, number_mode=False, regex_pattern=None, cache_root=None, extensions=None):
+    """
+    指定した .zip ファイル内の対象ファイルに対して、各行単位で検索を行います。
+    キャッシュ用ディレクトリが指定されている場合は、キャッシュ済み対象ファイルを利用します。
+    """
+    if cache_root:
+        target_files = get_cached_files(zip_path, cache_root, extensions)
+        for target_file in target_files:
+            try:
+                with open(target_file, 'r', encoding='utf-8') as f:
+                    for line_number, line in enumerate(f, start=1):
+                        line = line.strip()
+                        if regex_pattern is not None:
+                            if re.search(regex_pattern, line):
+                                result_line = (
+                                    f"ZIP: {os.path.basename(zip_path)}, "
+                                    f"FILE: {os.path.basename(target_file)}, "
+                                    f"Line: {line_number}, "
+                                    f"Content: {line}"
+                                )
+                                output_lines.append(result_line)
+                        else:
+                            match_found = True
+                            for term in search_terms:
+                                if number_mode and term.isdigit():
+                                    pattern = r'(?<![\d\.\-])' + re.escape(term) + r'(?![\d\.\-])'
+                                    if not re.search(pattern, line):
+                                        match_found = False
+                                        break
+                                else:
+                                    if term not in line:
+                                        match_found = False
+                                        break
+                            if match_found:
+                                result_line = (
+                                    f"ZIP: {os.path.basename(zip_path)}, "
+                                    f"FILE: {os.path.basename(target_file)}, "
+                                    f"Line: {line_number}, "
+                                    f"Content: {line}"
+                                )
+                                output_lines.append(result_line)
+            except Exception as e:
+                print(f"Error processing cached file {target_file} for {zip_path}: {e}")
+    else:
+        # キャッシュを使用しない場合
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            for file_name in z.namelist():
+                if any(file_name.lower().endswith(ext) for ext in extensions):
+                    try:
+                        with z.open(file_name, 'r') as f:
+                            with io.TextIOWrapper(f, encoding='utf-8') as text_file:
+                                for line_number, line in enumerate(text_file, start=1):
+                                    line = line.strip()
+                                    if regex_pattern is not None:
+                                        if re.search(regex_pattern, line):
+                                            result_line = (
+                                                f"ZIP: {os.path.basename(zip_path)}, "
+                                                f"FILE: {file_name}, "
+                                                f"Line: {line_number}, "
+                                                f"Content: {line}"
+                                            )
+                                            output_lines.append(result_line)
+                                    else:
+                                        match_found = True
+                                        for term in search_terms:
+                                            if number_mode and term.isdigit():
+                                                pattern = r'(?<![\d\.\-])' + re.escape(term) + r'(?![\d\.\-])'
+                                                if not re.search(pattern, line):
+                                                    match_found = False
+                                                    break
+                                            else:
+                                                if term not in line:
+                                                    match_found = False
+                                                    break
+                                        if match_found:
+                                            result_line = (
+                                                f"ZIP: {os.path.basename(zip_path)}, "
+                                                f"FILE: {file_name}, "
+                                                f"Line: {line_number}, "
+                                                f"Content: {line}"
+                                            )
+                                            output_lines.append(result_line)
+                    except Exception as e:
+                        print(f"Error processing {file_name} in {zip_path}: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ZIP内の対象ファイルおよび直接の対象ファイルを検索して結果を出力します"
+    )
+    parser.add_argument(
+        "search_terms", nargs="*",
+        help="検索するキーワード（AND条件：1行に全ての単語があればヒット）"
+    )
+    parser.add_argument(
+        "-d", "--dir", default="./audit",
+        help="対象ファイルがあるフォルダ（デフォルト: ./audit）"
+    )
+    parser.add_argument(
+        "--num", action="store_true",
+        help="数字専用の検索: IPやUUIDの一部ではない数字のみを検索します"
+    )
+    parser.add_argument(
+        "--regex", nargs="+",
+        help="正規表現文字列で検索する場合に指定します。複数単語指定された場合は空白で結合されます。"
+    )
+    parser.add_argument(
+        "--cache", default=".cache",
+        help="キャッシュ用ディレクトリ（デフォルト: .cache）; ZIPファイル内の対象ファイルのみキャッシュ対象です"
+    )
+    parser.add_argument(
+        "--no-header", action="store_true",
+        help="出力ファイルのヘッダー行を抑止します"
+    )
+    parser.add_argument(
+        "--extensions", nargs="+", default=["csv"],
+        help="対象ファイルの拡張子（例: csv, txt, tsv） ※拡張子の先頭のドットは省略可能"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.regex:
+        regex_pattern = ' '.join(args.regex)
+    elif args.search_terms:
+        regex_pattern = None
+    else:
+        print("エラー: 検索キーワードまたは正規表現を指定してください。")
+        sys.exit(1)
+    
+    # 拡張子の正規化：先頭にドットがなければ追加し、全て小文字に変換
+    extensions = [ext if ext.startswith('.') else '.'+ext for ext in args.extensions]
+    extensions = [ext.lower() for ext in extensions]
+    
+    now = datetime.datetime.now()
+    output_file = f"result_{now.strftime('%Y%m%d_%H%M%S')}.txt"
+    
+    if not os.path.isdir(args.dir):
+        print(f"指定されたフォルダ {args.dir} は存在しません。")
+        sys.exit(1)
+    
+    # キャッシュ用ディレクトリの作成（存在しなければ）
+    if not os.path.isdir(args.cache):
+        os.makedirs(args.cache, exist_ok=True)
+    
+    results = []
+    # 対象フォルダ内のファイルを走査（.zip と対象ファイルをそれぞれ処理）
+    for f in os.listdir(args.dir):
+        full_path = os.path.join(args.dir, f)
+        if os.path.isfile(full_path):
+            if f.lower().endswith('.zip'):
+                search_in_zip(full_path, args.search_terms, results,
+                              number_mode=args.num, regex_pattern=regex_pattern,
+                              cache_root=args.cache, extensions=extensions)
+            elif any(f.lower().endswith(ext) for ext in extensions):
+                search_in_file(full_path, args.search_terms, results,
+                               number_mode=args.num, regex_pattern=regex_pattern, label="FILE")
+    
+    with open(output_file, 'w', encoding='utf-8') as out_f:
+        # ヘッダー行の出力（--no-header が指定されなければ）
+        if not args.no_header:
+            if regex_pattern is not None:
+                header = f"Search Mode: Regular Expression search. Pattern: {regex_pattern}"
+            else:
+                header = f"Search Mode: AND search. Keywords: {' '.join(args.search_terms)}"
+                if args.num:
+                    header += " (Number mode enabled)"
+            header += " | Sources: ZIP files (with caching) and direct files."
+            out_f.write(header + "\n")
+        for line in results:
+            out_f.write(line + "\n")
+    
+    print(f"検索が完了しました。結果は {output_file} に出力されました。")
+    print(f"ヒットした行数: {len(results)}")
+
+if __name__ == '__main__':
+    main()
